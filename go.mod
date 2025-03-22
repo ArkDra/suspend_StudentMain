@@ -1,4 +1,4 @@
-module suspendStudentMain
+module github.com/ArkDra/suspend_StudentMain
 
 go 1.23.4
 
