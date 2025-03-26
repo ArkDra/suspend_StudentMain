@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -89,16 +90,16 @@ func unregisterGlobalHotKey() error {
 	return nil
 }
 
-func getMessage() error {
+func getMessage() bool {
 	ret, _, _ := PeekMessage.Call(uintptr(unsafe.Pointer(&msg)), uintptr(0), 0, 0, PM_REMOVE)
 	if ret == 0 {
-		return fmt.Errorf("GetMessage failed")
+		return false
 	}
 	if msg.Message == WM_HOTKEY && msg.WParam == uintptr(HOTKEY_ID) {
 		fmt.Println("HotKey pressed")
-		return nil
+		return true
 	} else {
-		return fmt.Errorf("GetMessage failed")
+		return false
 	}
 }
 
@@ -110,8 +111,8 @@ func getProcessSnapshot() (windows.Handle, error) {
 	return windows.Handle(processSnapshotHandle), nil
 }
 
-func enumProcesses(processSnapshotHandle windows.Handle) (map[string]uint32, error) {
-	processMap := make(map[string]uint32)
+func enumProcesses(processSnapshotHandle windows.Handle) (map[string][]uint32, error) {
+	processMap := make(map[string][]uint32)
 	var pe32 windows.ProcessEntry32
 	pe32.Size = uint32(unsafe.Sizeof(pe32))
 
@@ -123,7 +124,7 @@ func enumProcesses(processSnapshotHandle windows.Handle) (map[string]uint32, err
 
 		processID := pe32.ProcessID
 		processName := windows.UTF16ToString(pe32.ExeFile[:])
-		processMap[processName] = processID
+		processMap[processName] = append(processMap[processName], processID)
 	}
 
 	defer windows.CloseHandle(processSnapshotHandle)
@@ -204,7 +205,7 @@ func processThreads() {
 	}
 }
 
-func getProcessMapAndThereadMap() (map[string]uint32, map[uint32][]uint32) {
+func getProcessMapAndThereadMap() (map[string][]uint32, map[uint32][]uint32) {
 	processSnapshotHandle, err := getProcessSnapshot()
 	handleError(err)
 	processMap, err := enumProcesses(processSnapshotHandle)
@@ -217,15 +218,17 @@ func getProcessMapAndThereadMap() (map[string]uint32, map[uint32][]uint32) {
 	return processMap, threadMap
 }
 
-func operateThreads(processMap map[string]uint32, threadMap map[uint32][]uint32, operation func(uint32) error) {
-	pid, ok := processMap[EXE_NAME]
+func operateThreads(processMap map[string][]uint32, threadMap map[uint32][]uint32, operation func(uint32) error) {
+	pids, ok := processMap[EXE_NAME]
 	handleOk(ok)
-	tids, ok := threadMap[pid]
-	handleOk(ok)
+	for _, pid := range pids {
+		tids, ok := threadMap[pid]
+		handleOk(ok)
 
-	for _, tid := range tids {
-		err := operation(tid)
-		handleError(err)
+		for _, tid := range tids {
+			err := operation(tid)
+			handleError(err)
+		}
 	}
 }
 
@@ -234,11 +237,10 @@ func main() {
 	handleError(err)
 
 	for {
-		err := getMessage()
-		if err == nil {
+		if getMessage() {
 			processThreads()
 		} else {
-			continue
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 }
