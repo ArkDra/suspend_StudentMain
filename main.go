@@ -53,23 +53,14 @@ type MSG struct {
 func handleError(err error) {
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
-		exit()
 	}
 }
 
 func handleOk(ok bool) {
 	if !ok {
 		fmt.Printf("%s not found\n", EXE_NAME)
-		exit()
+		os.Exit(0)
 	}
-}
-
-func exit() {
-	err := unregisterGlobalHotKey()
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-	}
-	os.Exit(1)
 }
 
 func registerGlobalHotKey() error {
@@ -172,12 +163,12 @@ func suspendThread(threadID uint32) error {
 	threadHandle, err := openThread(threadID)
 	handleError(err)
 
-	_, ret, _ := SuspendThread.Call(threadHandle)
-	if ret != 0 {
+	count, _, _ := SuspendThread.Call(threadHandle)
+	if count == 0xFFFFFFFF {
 		return fmt.Errorf("SuspendThread failed")
 	}
 	// fmt.Println("SuspendThread succeed")
-	defer windows.CloseHandle(windows.Handle(threadHandle))
+	isSuspended = true
 	return nil
 }
 
@@ -185,12 +176,17 @@ func resumeThread(threadID uint32) error {
 	threadHandle, err := openThread(threadID)
 	handleError(err)
 
-	_, ret, _ := ResumeThread.Call(threadHandle)
-	if ret != 0 {
+	count, _, _ := ResumeThread.Call(threadHandle)
+	if count == 0xFFFFFFFF {
 		return fmt.Errorf("ResumeThread failed")
+	}
+	if count > 1 {
+		isSuspended = true
+		return nil
 	}
 	// fmt.Println("ResumeThread succeed")
 	defer windows.CloseHandle(windows.Handle(threadHandle))
+	isSuspended = false
 	return nil
 }
 
@@ -198,10 +194,8 @@ func processThreads() {
 	processMap, threadMap := getProcessMapAndThereadMap()
 	if !isSuspended {
 		operateThreads(processMap, threadMap, suspendThread)
-		isSuspended = true
 	} else {
 		operateThreads(processMap, threadMap, resumeThread)
-		isSuspended = false
 	}
 }
 
@@ -235,6 +229,7 @@ func operateThreads(processMap map[string][]uint32, threadMap map[uint32][]uint3
 func main() {
 	err := registerGlobalHotKey()
 	handleError(err)
+	defer unregisterGlobalHotKey()
 
 	for {
 		if getMessage() {
