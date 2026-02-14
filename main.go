@@ -175,7 +175,10 @@ func createSingleInstanceMutex() (windows.Handle, error) {
 
 func suspendThread(threadID uint32) error {
 	threadHandle, err := openThread(threadID)
-	handleError(err)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(windows.Handle(threadHandle))
 
 	count, _, _ := SuspendThread.Call(threadHandle)
 	if count == 0xFFFFFFFF {
@@ -188,7 +191,10 @@ func suspendThread(threadID uint32) error {
 
 func resumeThread(threadID uint32) error {
 	threadHandle, err := openThread(threadID)
-	handleError(err)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(windows.Handle(threadHandle))
 
 	count, _, _ := ResumeThread.Call(threadHandle)
 	if count == 0xFFFFFFFF {
@@ -199,7 +205,6 @@ func resumeThread(threadID uint32) error {
 		return nil
 	}
 	// fmt.Println("ResumeThread succeed")
-	defer windows.CloseHandle(windows.Handle(threadHandle))
 	isSuspended = false
 	return nil
 }
