@@ -1,8 +1,8 @@
 package main
 
 import (
+	"errors"
 	"fmt"
-	"os"
 	"time"
 	"unsafe"
 
@@ -26,7 +26,8 @@ var (
 )
 
 const (
-	EXE_NAME = "StudentMain.exe"
+	EXE_NAME   = "StudentMain.exe"
+	MUTEX_NAME = "suspend_StudentMain_single_instance_mutex"
 
 	MOD_CONTROL            = 0x0002
 	VK_SPACE               = 0x20
@@ -53,13 +54,6 @@ type MSG struct {
 func handleError(err error) {
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
-	}
-}
-
-func handleOk(ok bool) {
-	if !ok {
-		fmt.Printf("%s not found\n", EXE_NAME)
-		os.Exit(0)
 	}
 }
 
@@ -159,6 +153,26 @@ func openThread(threadID uint32) (uintptr, error) {
 	return threadHandle, nil
 }
 
+func createSingleInstanceMutex() (windows.Handle, error) {
+	namePtr, err := windows.UTF16PtrFromString(MUTEX_NAME)
+	if err != nil {
+		return 0, fmt.Errorf("UTF16PtrFromString failed: %w", err)
+	}
+
+	mutexHandle, err := windows.CreateMutex(nil, false, namePtr)
+	if err != nil {
+		if mutexHandle != 0 {
+			_ = windows.CloseHandle(mutexHandle)
+		}
+		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return 0, fmt.Errorf("another instance is already running")
+		}
+		return 0, fmt.Errorf("CreateMutex failed: %w", err)
+	}
+
+	return mutexHandle, nil
+}
+
 func suspendThread(threadID uint32) error {
 	threadHandle, err := openThread(threadID)
 	handleError(err)
@@ -214,22 +228,48 @@ func getProcessMapAndThereadMap() (map[string][]uint32, map[uint32][]uint32) {
 
 func operateThreads(processMap map[string][]uint32, threadMap map[uint32][]uint32, operation func(uint32) error) {
 	pids, ok := processMap[EXE_NAME]
-	handleOk(ok)
+	if !ok || len(pids) == 0 {
+		fmt.Printf("%s not found, waiting...\n", EXE_NAME)
+		isSuspended = false
+		return
+	}
+
+	hasThread := false
 	for _, pid := range pids {
 		tids, ok := threadMap[pid]
-		handleOk(ok)
+		if !ok || len(tids) == 0 {
+			continue
+		}
 
+		hasThread = true
 		for _, tid := range tids {
 			err := operation(tid)
 			handleError(err)
 		}
 	}
+
+	if !hasThread {
+		fmt.Printf("%s has no available threads, waiting...\n", EXE_NAME)
+		isSuspended = false
+	}
 }
 
 func main() {
-	err := registerGlobalHotKey()
-	handleError(err)
-	defer unregisterGlobalHotKey()
+	mutexHandle, err := createSingleInstanceMutex()
+	if err != nil {
+		handleError(err)
+		return
+	}
+	defer windows.CloseHandle(mutexHandle)
+
+	err = registerGlobalHotKey()
+	if err != nil {
+		handleError(err)
+		return
+	}
+	defer func() {
+		handleError(unregisterGlobalHotKey())
+	}()
 
 	for {
 		if getMessage() {
