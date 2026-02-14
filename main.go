@@ -21,8 +21,9 @@ var (
 	SuspendThread            = kernel32.NewProc("SuspendThread")
 	ResumeThread             = kernel32.NewProc("ResumeThread")
 
-	msg         MSG
-	isSuspended = false
+	errOpenThread = errors.New("open thread failed")
+	msg           MSG
+	suspendedByUs = make(map[uint32]uint32)
 )
 
 const (
@@ -146,11 +147,30 @@ func enumThreads(threadSnapshotHandle windows.Handle) (map[uint32][]uint32, erro
 }
 
 func openThread(threadID uint32) (uintptr, error) {
-	threadHandle, _, _ := OpenThread.Call(uintptr(THREADS_SUSPEND_RESUME), 0, uintptr(threadID))
+	threadHandle, _, callErr := OpenThread.Call(uintptr(THREADS_SUSPEND_RESUME), 0, uintptr(threadID))
 	if threadHandle == 0 {
-		return uintptr(0), fmt.Errorf("OpenThread failed")
+		if callErr != windows.ERROR_SUCCESS {
+			return uintptr(0), fmt.Errorf("%w (tid=%d): %v", errOpenThread, threadID, callErr)
+		}
+		return uintptr(0), fmt.Errorf("%w (tid=%d)", errOpenThread, threadID)
 	}
 	return threadHandle, nil
+}
+
+func markThreadSuspended(threadID uint32) {
+	suspendedByUs[threadID]++
+}
+
+func markThreadResumed(threadID uint32, resumeCount uintptr) {
+	trackedCount, ok := suspendedByUs[threadID]
+	if !ok {
+		return
+	}
+	if resumeCount == 0 || trackedCount <= 1 {
+		delete(suspendedByUs, threadID)
+		return
+	}
+	suspendedByUs[threadID] = trackedCount - 1
 }
 
 func createSingleInstanceMutex() (windows.Handle, error) {
@@ -185,7 +205,7 @@ func suspendThread(threadID uint32) error {
 		return fmt.Errorf("SuspendThread failed")
 	}
 	// fmt.Println("SuspendThread succeed")
-	isSuspended = true
+	markThreadSuspended(threadID)
 	return nil
 }
 
@@ -200,22 +220,19 @@ func resumeThread(threadID uint32) error {
 	if count == 0xFFFFFFFF {
 		return fmt.Errorf("ResumeThread failed")
 	}
-	if count > 1 {
-		isSuspended = true
-		return nil
-	}
+	markThreadResumed(threadID, count)
 	// fmt.Println("ResumeThread succeed")
-	isSuspended = false
 	return nil
 }
 
 func processThreads() {
-	processMap, threadMap := getProcessMapAndThereadMap()
-	if !isSuspended {
-		operateThreads(processMap, threadMap, suspendThread)
-	} else {
-		operateThreads(processMap, threadMap, resumeThread)
+	if len(suspendedByUs) > 0 {
+		resumeTrackedThreads()
+		return
 	}
+
+	processMap, threadMap := getProcessMapAndThereadMap()
+	suspendProcessThreads(processMap, threadMap)
 }
 
 func getProcessMapAndThereadMap() (map[string][]uint32, map[uint32][]uint32) {
@@ -231,11 +248,10 @@ func getProcessMapAndThereadMap() (map[string][]uint32, map[uint32][]uint32) {
 	return processMap, threadMap
 }
 
-func operateThreads(processMap map[string][]uint32, threadMap map[uint32][]uint32, operation func(uint32) error) {
+func suspendProcessThreads(processMap map[string][]uint32, threadMap map[uint32][]uint32) {
 	pids, ok := processMap[EXE_NAME]
 	if !ok || len(pids) == 0 {
 		fmt.Printf("%s not found, waiting...\n", EXE_NAME)
-		isSuspended = false
 		return
 	}
 
@@ -248,14 +264,30 @@ func operateThreads(processMap map[string][]uint32, threadMap map[uint32][]uint3
 
 		hasThread = true
 		for _, tid := range tids {
-			err := operation(tid)
+			err := suspendThread(tid)
 			handleError(err)
 		}
 	}
 
 	if !hasThread {
 		fmt.Printf("%s has no available threads, waiting...\n", EXE_NAME)
-		isSuspended = false
+	}
+}
+
+func resumeTrackedThreads() {
+	tids := make([]uint32, 0, len(suspendedByUs))
+	for tid := range suspendedByUs {
+		tids = append(tids, tid)
+	}
+
+	for _, tid := range tids {
+		err := resumeThread(tid)
+		if err != nil {
+			if errors.Is(err, errOpenThread) {
+				delete(suspendedByUs, tid)
+			}
+			handleError(err)
+		}
 	}
 }
 
